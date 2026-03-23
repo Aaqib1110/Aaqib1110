@@ -15,7 +15,7 @@ Architecture
 2.  Feature Layer   – ADX, ATR, Supertrend, VWAP, rolling volatility
 3.  Regime Engine   – classifies each bar as Trending / Mean-Reverting / High-Vol
 4.  Signal Engine   – generates entry signals only in Trending regime
-5.  Risk Engine     – ATR-based SL, 1:2 RR take-profit, position sizing (0.5 % risk)
+5.  Risk Engine     – ATR-based SL, 1:2 RR take-profit, position sizing (0.5% risk)
 6.  Execution Layer – simulates slippage + commissions; live via Alpaca paper API
 7.  Backtest Engine – walk-forward simulation with realistic costs
 8.  Circuit Breaker – halts trading after 3 consecutive losses
@@ -86,7 +86,7 @@ VOL_HIGH_PERCENTILE: float = 80.0  # above this rolling-vol percentile → high-
 VOLUME_MIN_MULTIPLIER: float = 1.2 # entry bar volume must be ≥ 1.2× rolling avg
 VWAP_DEV_MIN: float = 0.001        # minimum VWAP deviation to consider a breakout
 MAX_CONSECUTIVE_LOSSES: int = 3
-LIQUID_HOURS: Tuple[int, int] = (9, 16)   # UTC hour range for trading (9 – 16)
+LIQUID_HOURS: Tuple[int, int] = (9, 16)   # UTC hours; adjust to 14-21 UTC for NYSE regular session
 
 
 # ===========================================================================
@@ -200,7 +200,7 @@ def compute_supertrend(
 def compute_vwap(df: pd.DataFrame) -> pd.Series:
     """
     Session VWAP reset each calendar day.
-    Returns the VWAP series and a normalised deviation ((close - vwap) / vwap).
+    Returns only the VWAP series; VWAP deviation is computed separately in add_features.
     """
     typical = (df["High"] + df["Low"] + df["Close"]) / 3
     cum_tpv = (typical * df["Volume"]).groupby(df.index.date).cumsum()
@@ -212,7 +212,7 @@ def compute_vwap(df: pd.DataFrame) -> pd.Series:
 def compute_rolling_volatility(df: pd.DataFrame, window: int = VOL_ROLLING_WINDOW) -> pd.Series:
     """Annualised rolling close-to-close volatility (as a fraction)."""
     log_ret = np.log(df["Close"] / df["Close"].shift(1))
-    return log_ret.rolling(window).std() * np.sqrt(252 * 78)  # 78 five-min bars/day
+    return log_ret.rolling(window).std() * np.sqrt(252 * 78)  # 78 five-min bars per regular trading day (9:30–16:00)
 
 
 def add_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -281,7 +281,7 @@ class Signal:
 
 
 def time_filter(ts: pd.Timestamp) -> bool:
-    """Return True only during liquid trading hours (09:00 – 16:00 UTC)."""
+    """Return True only during liquid trading hours defined by LIQUID_HOURS (UTC)."""
     return LIQUID_HOURS[0] <= ts.hour < LIQUID_HOURS[1]
 
 
@@ -925,8 +925,13 @@ def live_trading_loop(
                                 "qty": qty,
                             }
 
+        except (ValueError, KeyError, IndexError) as exc:
+            log.error("Recoverable error in live loop: %s", exc)
+        except EnvironmentError as exc:
+            log.critical("Authentication/connectivity error – stopping loop: %s", exc)
+            break
         except Exception as exc:  # noqa: BLE001
-            log.error("Error in live loop: %s", exc)
+            log.error("Unexpected error in live loop: %s", exc, exc_info=True)
 
         time.sleep(poll_seconds)
 
